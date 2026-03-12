@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2024 VMware, Inc. or its affiliates, All Rights Reserved.
+ * Copyright (c) 2017-2026 VMware, Inc. or its affiliates, All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,15 @@
  */
 package reactor.netty.http.client;
 
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Objects;
 import java.util.function.Supplier;
 
 import io.netty.util.NetUtil;
+import org.jspecify.annotations.Nullable;
 
 import static reactor.netty.transport.DomainSocketAddressUtils.isDomainSocketAddress;
 import static reactor.netty.transport.DomainSocketAddressUtils.path;
@@ -29,14 +32,30 @@ final class UriEndpoint {
 	final String scheme;
 	final String host;
 	final int port;
-	final Supplier<? extends SocketAddress> remoteAddress;
+	// Exactly one of remoteAddress or remoteAddressSupplier is non-null.
+	// remoteAddress is used for absolute URLs where the address is derived from the URL itself.
+	// remoteAddressSupplier is used for relative URLs where the address is provided by the user and may change between invocations.
+	@SuppressWarnings("NullAway")
+	final @Nullable SocketAddress remoteAddress;
+	@SuppressWarnings("NullAway")
+	final @Nullable Supplier<? extends SocketAddress> remoteAddressSupplier;
 	final String pathAndQuery;
 
-	UriEndpoint(String scheme, String host, int port, Supplier<? extends SocketAddress> remoteAddress, String pathAndQuery) {
+	UriEndpoint(String scheme, String host, int port, SocketAddress remoteAddress, String pathAndQuery) {
 		this.host = host;
 		this.port = port;
 		this.scheme = Objects.requireNonNull(scheme, "scheme");
-		this.remoteAddress = Objects.requireNonNull(remoteAddress, "remoteAddressSupplier");
+		this.remoteAddress = Objects.requireNonNull(remoteAddress, "remoteAddress");
+		this.remoteAddressSupplier = null;
+		this.pathAndQuery = Objects.requireNonNull(pathAndQuery, "pathAndQuery");
+	}
+
+	UriEndpoint(String scheme, String host, int port, Supplier<? extends SocketAddress> remoteAddressSupplier, String pathAndQuery) {
+		this.host = host;
+		this.port = port;
+		this.scheme = Objects.requireNonNull(scheme, "scheme");
+		this.remoteAddress = null;
+		this.remoteAddressSupplier = Objects.requireNonNull(remoteAddressSupplier, "remoteAddressSupplier");
 		this.pathAndQuery = Objects.requireNonNull(pathAndQuery, "pathAndQuery");
 	}
 
@@ -57,12 +76,12 @@ final class UriEndpoint {
 	}
 
 	SocketAddress getRemoteAddress() {
-		return remoteAddress.get();
+		return remoteAddress != null ? remoteAddress : remoteAddressSupplier.get();
 	}
 
 	String toExternalForm() {
 		StringBuilder sb = new StringBuilder();
-		SocketAddress address = remoteAddress.get();
+		SocketAddress address = getRemoteAddress();
 		if (isDomainSocketAddress(address)) {
 			sb.append(path(address));
 		}
@@ -81,18 +100,31 @@ final class UriEndpoint {
 		if (!(address instanceof InetSocketAddress)) {
 			throw new IllegalStateException("Only support InetSocketAddress representation");
 		}
-		String addressString = NetUtil.toSocketAddressString((InetSocketAddress) address);
-		if (secure) {
-			if (addressString.endsWith(":443")) {
-				addressString = addressString.substring(0, addressString.length() - 4);
-			}
+		InetSocketAddress inetAddr = (InetSocketAddress) address;
+		int port = inetAddr.getPort();
+		if ((secure && port == 443) || (!secure && port == 80)) {
+			return inetSocketAddressHostString(inetAddr);
 		}
-		else {
-			if (addressString.endsWith(":80")) {
-				addressString = addressString.substring(0, addressString.length() - 3);
+		return NetUtil.toSocketAddressString(inetAddr);
+	}
+
+	static String inetSocketAddressHostString(InetSocketAddress addr) {
+		if (addr.isUnresolved()) {
+			String hostname = NetUtil.getHostname(addr);
+			if (NetUtil.isValidIpV6Address(hostname)) {
+				if (hostname.charAt(0) == '[') {
+					return hostname;
+				}
+				return '[' + hostname + ']';
 			}
+			return hostname;
 		}
-		return addressString;
+		InetAddress inetAddress = addr.getAddress();
+		String host = NetUtil.toAddressString(inetAddress);
+		if (inetAddress instanceof Inet6Address) {
+			return '[' + host + ']';
+		}
+		return host;
 	}
 
 	@Override
@@ -114,6 +146,6 @@ final class UriEndpoint {
 
 	@Override
 	public int hashCode() {
-		return Objects.hash(getRemoteAddress());
+		return getRemoteAddress().hashCode();
 	}
 }
